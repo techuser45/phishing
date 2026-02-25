@@ -1,5 +1,16 @@
 import re
 import time
+import joblib
+import os
+
+# Load ML models
+try:
+    email_model = joblib.load('models/email_model.joblib')
+    file_model = joblib.load('models/file_model.joblib')
+    ML_AVAILABLE = True
+except:
+    ML_AVAILABLE = False
+    print("Warning: ML models not found. Falling back to rule-based detection only.")
 
 def analyze_url(url):
     score = 100
@@ -92,32 +103,83 @@ def analyze_email(text):
     score = 100
     verdict = "safe"
     steps = [
-        {"name": "Phishing Patterns", "status": "safe", "details": "No common templates matched"},
-        {"name": "Urgency Analysis", "status": "safe", "details": "Tone is standard"},
-        {"name": "Financial Risk", "status": "safe", "details": "No financial requests found"},
+        {"name": "Rule Analysis", "status": "safe", "details": "No suspicious keywords matched"},
+        {"name": "AI Prediction", "status": "safe", "details": "AI model analysis complete"},
+        {"name": "Urgency Scan", "status": "safe", "details": "Tone is standard"},
         {"name": "Link Inspection", "status": "safe", "details": "Links appear safe"}
     ]
 
     lower_text = text.lower()
+    
+    # Emotional Deception Score (EDS) Breakdown
+    eds = {
+        "fear": 0.0,
+        "urgency": 0.0,
+        "trust": 0.0,
+        "greed": 0.0,
+        "authority": 0.0
+    }
 
-    # 1. URGENCY / SOCIAL ENGINEERING
-    urgency_words = ["urgent", "immediately", "24 hours", "suspended", "locked", "unusual activity", "action required"]
-    if any(w in lower_text for w in urgency_words):
+    # 1. ML Analysis (AI)
+    ml_confidence = 0.0
+    if ML_AVAILABLE:
+        label = email_model.predict([text])[0]
+        probs = email_model.predict_proba([text])[0]
+        ml_confidence = float(max(probs))
+        
+        if label == 'phishing':
+            score -= 50 * ml_confidence
+            steps[1] = {"name": "AI Prediction", "status": "danger", "details": f"AI flagged as PHISHING (Confidence: {ml_confidence:.1%})"}
+        elif label == 'suspicious':
+            score -= 25 * ml_confidence
+            steps[1] = {"name": "AI Prediction", "status": "warning", "details": f"AI flagged as SUSPICIOUS (Confidence: {ml_confidence:.1%})"}
+        else:
+            steps[1] = {"name": "AI Prediction", "status": "safe", "details": f"AI flagged as LEGIT (Confidence: {ml_confidence:.1%})"}
+
+    # 2. URGENCY / SOCIAL ENGINEERING
+    urgency_words = ["urgent", "immediately", "24 hours", "suspended", "locked", "unusual activity", "action required", "expiring", "now"]
+    urgency_matches = [w for w in urgency_words if w in lower_text]
+    if urgency_matches:
+        eds["urgency"] = min(1.0, len(urgency_matches) * 0.2 + (0.3 if "urgent" in lower_text else 0))
         score -= 30
-        steps[1] = {"name": "Urgency Analysis", "status": "danger", "details": "High urgency/Panic induction detected"}
+        steps[2] = {"name": "Urgency Scan", "status": "danger", "details": "High urgency/Panic induction detected"}
 
-    # 2. FINANCIAL / CREDENTIALS
+    # 3. FEAR
+    fear_words = ["consequences", "legal action", "penalty", "block", "security breach", "unauthorized", "stolen", "deleted"]
+    fear_matches = [w for w in fear_words if w in lower_text]
+    if fear_matches:
+        eds["fear"] = min(1.0, len(fear_matches) * 0.25)
+        score -= 20
+
+    # 4. TRUST (Misuse of Trust)
+    trust_words = ["official", "support", "security team", "verified", "no-reply", "customer service"]
+    trust_matches = [w for w in trust_words if w in lower_text]
+    if trust_matches:
+        eds["trust"] = min(1.0, len(trust_matches) * 0.2)
+        score -= 10
+
+    # 5. GREED
+    greed_words = ["winner", "prize", "refund", "bonus", "free", "claim", "reward", "cash"]
+    greed_matches = [w for w in greed_words if w in lower_text]
+    if greed_matches:
+        eds["greed"] = min(1.0, len(greed_matches) * 0.25)
+        score -= 25
+
+    # 6. AUTHORITY
+    authority_words = ["director", "ceo", "department", "administrator", "manager", "official notice"]
+    authority_matches = [w for w in authority_words if w in lower_text]
+    if authority_matches:
+        eds["authority"] = min(1.0, len(authority_matches) * 0.2)
+        score -= 15
+
+    # 7. FINANCIAL / CREDENTIALS
     financial_words = ["verify your account", "confirm payment", "credit card", "bank details", "password", "social security", "billing info"]
     if any(w in lower_text for w in financial_words):
         score -= 30
-        steps[2] = {"name": "Financial Risk", "status": "warning", "details": "Requests for sensitive information"}
+        if steps[0]["status"] == "safe":
+            steps[0] = {"name": "Rule Analysis", "status": "warning", "details": "Requests for sensitive information"}
 
-    # 3. GENERIC GREETINGS
-    if len(lower_text) < 50 and ("dear customer" in lower_text or "dear user" in lower_text):
-        score -= 10
-        steps[0] = {"name": "Phishing Patterns", "status": "warning", "details": "Generic greeting detected"}
-
-    # 4. SUSPICIOUS LINKS
+    # 8. SUSPICIOUS LINKS
     if any(link in lower_text for link in ["http://", "bit.ly", "tinyurl"]):
         score -= 20
         steps[3] = {"name": "Link Inspection", "status": "warning", "details": "Contains shortened or insecure links"}
@@ -127,19 +189,42 @@ def analyze_email(text):
     elif score < 85:
         verdict = "warning"
 
-    return {"verdict": verdict, "score": max(0, score), "steps": steps}
+    # Overall EDS is an average of the components for the main score
+    total_eds = sum(eds.values()) / 5.0
+
+    return {
+        "verdict": verdict, 
+        "score": max(0, score), 
+        "steps": steps,
+        "phishing_probability": (100 - score) / 100.0,
+        "emotional_deception_score": total_eds,
+        "eds_breakdown": eds,
+        "confidence": ml_confidence if ML_AVAILABLE else 0.8 # Default confidence for rule-based
+    }
 
 
 def analyze_file(file_name):
     score = 100
     verdict = "safe"
     steps = [
-        {"name": "Extension Check", "status": "safe", "details": "Safe file type"},
+        {"name": "AI Extension Scan", "status": "safe", "details": "AI file type analysis complete"},
         {"name": "Double Extension", "status": "safe", "details": "Single extension found"},
         {"name": "Heuristic Scan", "status": "safe", "details": "No malicious patterns"}
     ]
 
     lower_name = file_name.lower()
+
+    # 1. ML Analysis (AI)
+    if ML_AVAILABLE:
+        label = file_model.predict([file_name])[0]
+        if label == 'phishing':
+            score -= 60
+            steps[0] = {"name": "AI Extension Scan", "status": "danger", "details": "AI identifies this filename pattern as MALICIOUS"}
+        elif label == 'suspicious':
+            score -= 30
+            steps[0] = {"name": "AI Extension Scan", "status": "warning", "details": "AI identifies this filename pattern as SUSPICIOUS"}
+        else:
+            steps[0] = {"name": "AI Extension Scan", "status": "safe", "details": "AI identifies this filename pattern as SAFE"}
 
     # Double Extension
     if lower_name.count(".") > 1:
@@ -147,21 +232,10 @@ def analyze_file(file_name):
             score -= 50
             steps[1] = {"name": "Double Extension", "status": "danger", "details": "Double extension masquerading detected"}
 
-    # Executables
-    if any(lower_name.endswith(ext) for ext in [".exe", ".bat", ".cmd", ".msi", ".scr"]):
-        score -= 40
-        if steps[0]["status"] == "safe":
-            steps[0] = {"name": "Extension Check", "status": "danger", "details": "High-risk executable type"}
-    # Scripts
-    elif any(lower_name.endswith(ext) for ext in [".js", ".vbs", ".ps1", ".py"]):
-        score -= 30
-        if steps[0]["status"] == "safe":
-            steps[0] = {"name": "Extension Check", "status": "warning", "details": "Script file - potential execution risk"}
-    # Archives
-    elif any(lower_name.endswith(ext) for ext in [".zip", ".rar", ".7z"]):
-        score -= 10
-        if steps[0]["status"] == "safe":
-            steps[0] = {"name": "Extension Check", "status": "warning", "details": "Archive file (contents hidden)"}
+    # Security Patterns in names
+    if any(kw in lower_name for kw in ["password", "crack", "hack", "bypass"]):
+        score -= 20
+        steps[2] = {"name": "Heuristic Scan", "status": "warning", "details": "Sensitive keywords in filename"}
 
     if score <= 50:
         verdict = "danger"
